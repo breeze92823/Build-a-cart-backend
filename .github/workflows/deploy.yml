@@ -9,10 +9,10 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # Repo variable, set under Settings -> Secrets and variables -> Actions -> Variables.
-  # Must match the lowercase game ID created on the Bloxity "My Games" dashboard
-  # (the client's GAME_SLUG in src/config.js: build-a-cart).
-  GAME_ID: ${{ vars.LEGION_GAME_ID || secrets.LEGION_GAME_ID }}
+  # Game slug = the repo/folder name lowercased without the "-backend" suffix
+  # (Build-a-cart-backend -> build-a-cart); must match the game ID on the Bloxity
+  # "My Games" dashboard. A LEGION_GAME_ID variable or secret overrides it.
+  GAME_ID_OVERRIDE: ${{ vars.LEGION_GAME_ID || secrets.LEGION_GAME_ID }}
 
 jobs:
   test:
@@ -49,12 +49,15 @@ jobs:
             echo "channel=dev" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve game slug
+        run: |
+          SLUG="${GITHUB_REPOSITORY#*/}"
+          SLUG="${SLUG,,}"
+          SLUG="${SLUG%-backend}"
+          echo "GAME_ID=${GAME_ID_OVERRIDE:-$SLUG}" >> "$GITHUB_ENV"
+
       - name: Validate required config
         run: |
-          if [ -z "${GAME_ID}" ]; then
-            echo "::error::LEGION_GAME_ID is not set (Settings > Secrets and variables > Actions > Variables)."
-            exit 1
-          fi
           if [ -z "${LEGION_DEPLOY_TOKEN}" ]; then
             echo "::error::Repo secret LEGION_DEPLOY_TOKEN is not set (Settings > Secrets and variables > Actions > Secrets)."
             exit 1
