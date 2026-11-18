@@ -5,6 +5,9 @@ import { WorldRoom } from "./rooms/WorldRoom.js";
 import { MAX_PAYLOAD_BYTES } from "./constants.js";
 
 const server = defineServer({
+  // index.ts traps SIGTERM itself so a deploy drains the rooms instead of disconnecting everyone.
+  gracefullyShutdown: false,
+
   // saveProgress carries the whole save (owned gear, loadouts, quests...), over the default 4 KB message cap.
   transport: new WebSocketTransport({ maxPayload: MAX_PAYLOAD_BYTES }),
 

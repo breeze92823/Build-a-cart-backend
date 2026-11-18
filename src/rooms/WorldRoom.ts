@@ -1,11 +1,14 @@
 import { Room, Client, CloseCode } from "colyseus";
 import { WorldState, PlayerState } from "./schema/WorldState.js";
-import { DISTANCE_MAX, GUEST_ID_PREFIX, LEADERBOARD_EVERY_MS, NAME_MAX, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS } from "../constants.js";
+import { AD_COOLDOWN_MS, DISTANCE_MAX, GUEST_ID_PREFIX, LEADERBOARD_EVERY_MS, NAME_MAX, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS } from "../constants.js";
 import { getPlayers, type PlayerDoc } from "../db.js";
 import { sanitizeProgress } from "../sanitize.js";
 import { accrue, rollWedge, spinStateFrom, type SpinState } from "../spin.js";
 import { claimDaily, dailyFields, dailyView, readDaily, rollDaily, type DailyState } from "../daily.js";
-import { applyAvatar, applyLoadout, applyPose } from "../presence.js";
+import { applyAvatar, applyCart, applyEmote, applyLoadout, applyPose } from "../presence.js";
+import { identityFor, type Claim, type Verified } from "../auth.js";
+import { verifyAdReward } from "../adReward.js";
+import { queueScores } from "../platformBoards.js";
 import { ranksOf, topBoards } from "../leaderboard.js";
 import { isQuestKind, questFields, questsView, readQuests, rerollQuests, rollQuests, type QuestState } from "../quests.js";
 
@@ -17,12 +20,24 @@ function sanitizePfp(raw: unknown): string {
   return typeof raw === "string" && raw.length <= PFP_MAX_LEN && /^https?:\/\//i.test(raw) ? raw : "";
 }
 
+// What a client says about itself on join / `identify`: its Bloxity game token (verified, auth.ts),
+// or off production a `devId` / legacy `userId`; plus how it looks.
+interface Who extends Claim {
+  username?: string;
+  pfp?: string;
+  avatar?: string;
+  outfit?: string;
+  pose?: unknown;
+  loadout?: unknown;
+  private?: boolean;
+}
+
 /**
- * Room every Build a Cart client joins via `client.joinOrCreate("world", { userId, username, pfp })`. Loads and
+ * Room every Build a Cart client joins via `client.joinOrCreate("world", { token, username, pfp })`. Loads and
  * saves each signed-in player's progress (MongoDB, see db.ts) -- the client keeps no save of its
  * own, so this is the only place progress lives. The game is client-authoritative: no gameplay
- * rules live here, saves are only bounded (sanitize.ts). Full rooms spill into a fresh one
- * automatically (maxClients).
+ * rules live here, saves are only bounded (sanitize.ts). One player per base: a room holds
+ * ROOM_MAX_CLIENTS (5), full rooms spill into a fresh one automatically (maxClients).
  */
 export class WorldRoom extends Room<{ state: WorldState }> {
   state = new WorldState();
@@ -46,6 +61,12 @@ export class WorldRoom extends Room<{ state: WorldState }> {
   // sessionId -> quest schedule (quests.ts), read with the save. Guests and serverless sessions
   // keep theirs here only.
   private quests = new Map<string, QuestState>();
+  // sessionId -> when the next rewarded-ad token may be redeemed (server clock), and the sessions with
+  // a verification in flight.
+  private adAt = new Map<string, number>();
+  private adBusy = new Set<string>();
+  // sessionId -> the platform-verified outfit key, which the client's own `setAvatar` outfit can't override.
+  private verifiedOutfit = new Map<string, string>();
 
   messages = {
     // Debounced push of the client's whole progress. Upserts, so a first save creates the document.
@@ -73,7 +94,15 @@ export class WorldRoom extends Room<{ state: WorldState }> {
         );
       } catch (err) {
         console.warn("[WorldRoom] saveProgress failed", err);
+        return;
       }
+      // Bloxity's own boards (platformBoards.ts): the verified account's latest scores, reported in batches.
+      queueScores(userId, {
+        ...(best !== undefined && { best: Math.floor(best) }),
+        ...(rest.totalEarned !== undefined && { earned: Math.floor(rest.totalEarned) }),
+        ...(rest.rebirths !== undefined && { rebirths: Math.floor(rest.rebirths) }),
+        ...(rest.playtime !== undefined && { playtime: Math.floor(rest.playtime / 60) }),
+      });
     },
     // Claims Daily Reward day `msg.day` (0-based). The server decides: answers `dailyResult`
     // { ok, day, ...state }; the client only grants the reward on ok.
@@ -140,11 +169,16 @@ export class WorldRoom extends Room<{ state: WorldState }> {
       const d = msg?.distance;
       p.distance = p.racing && typeof d === "number" && Number.isFinite(d) ? Math.min(DISTANCE_MAX, Math.max(0, d)) : 0;
     },
-    // Presence (presence.ts): the sender's pose ~10x/s, its equipped gear and its Bloxity look,
-    // relayed through the roster so everyone draws them in the world (client remotePlayers.js).
+    // Presence (presence.ts), relayed through the roster so everyone draws the sender in the world
+    // (client remotePlayers.js): the walking pose ~10x/s, the riding cart ~15x/s, the equipped gear
+    // and trailing carts, the Bloxity look and the portal emote being played.
     pose: (client: Client, msg: unknown) => {
       const p = this.state.players.get(client.sessionId);
       if (p) applyPose(p, msg);
+    },
+    cart: (client: Client, msg: unknown) => {
+      const p = this.state.players.get(client.sessionId);
+      if (p) applyCart(p, msg);
     },
     loadout: (client: Client, msg: unknown) => {
       const p = this.state.players.get(client.sessionId);
@@ -152,22 +186,54 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     },
     setAvatar: (client: Client, msg: unknown) => {
       const p = this.state.players.get(client.sessionId);
-      if (p) applyAvatar(p, msg);
+      if (!p) return;
+      applyAvatar(p, msg);
+      const verified = this.verifiedOutfit.get(client.sessionId);
+      if (verified) p.outfit = verified;
+    },
+    emote: (client: Client, msg: unknown) => {
+      const p = this.state.players.get(client.sessionId);
+      if (p) applyEmote(p, msg);
+    },
+    // A rewarded ad finished on the client (Bloxity `ads.showRewarded`): its token is checked with
+    // Bloxity before the client pays out. Answers `adReward` { ok, reason?: "cooldown" | "invalid" }.
+    adReward: async (client: Client, msg: { rewardToken?: unknown }) => {
+      const sid = client.sessionId;
+      if (Date.now() < (this.adAt.get(sid) ?? 0) || this.adBusy.has(sid)) return client.send("adReward", { ok: false, reason: "cooldown" });
+      this.adBusy.add(sid);
+      let ok = false;
+      try {
+        ok = await verifyAdReward(msg?.rewardToken);
+      } finally {
+        this.adBusy.delete(sid);
+      }
+      if (!this.state.players.has(sid)) return; // left meanwhile
+      if (!ok) return client.send("adReward", { ok: false, reason: "invalid" });
+      this.adAt.set(sid, Date.now() + AD_COOLDOWN_MS);
+      client.send("adReward", { ok: true });
     },
     // Re-states identity after a login/logout that happens AFTER join (a guest who signs in
-    // mid-session). The server answers with progress/noProgress for the new identity.
-    identify: (client: Client, msg: { username?: string; userId?: string; pfp?: string }) => {
+    // mid-session): a new token (or none), name, picture and look. Re-verified; the server answers with
+    // progress/noProgress for the new identity. Without token / devId / userId only the name, picture
+    // and look change.
+    identify: async (client: Client, msg: Who) => {
       const p = this.state.players.get(client.sessionId);
-      if (!p) return;
-      if (typeof msg?.username === "string") p.username = sanitizeName(msg.username);
-      if (typeof msg?.pfp === "string") p.pfp = sanitizePfp(msg.pfp);
-      if (typeof msg?.userId === "string") this.setUserId(client, p, msg.userId);
+      if (!p || !msg || typeof msg !== "object") return;
+      if (typeof msg.username === "string") p.username = sanitizeName(msg.username);
+      if (typeof msg.pfp === "string") p.pfp = sanitizePfp(msg.pfp);
+      applyAvatar(p, msg);
+      if (!("token" in msg || "devId" in msg || "userId" in msg)) return;
+      const who = await identityFor(msg);
+      if (this.state.players.get(client.sessionId) !== p) return; // left while the token was checked
+      this.applyIdentity(client, p, who);
     },
   };
 
   // Leaderboards (leaderboard.ts): everyone gets the top lists + their own ranks every
   // LEADERBOARD_EVERY_MS, and once right after their save loads.
-  onCreate() {
+  onCreate(options?: { private?: boolean }) {
+    // CrazyGames "Play with friends" (?instantMultiplayer=true) makes a private room.
+    if (options?.private) void this.setPrivate(true);
     this.clock.setInterval(() => {
       for (const c of this.clients) void this.sendLeaderboard(c);
     }, LEADERBOARD_EVERY_MS);
@@ -185,7 +251,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     }
   }
 
-  onJoin(client: Client, options?: { username?: string; userId?: string; pfp?: string; pose?: unknown; loadout?: unknown; avatar?: string }) {
+  async onJoin(client: Client, options?: Who) {
     const p = new PlayerState();
     p.username = sanitizeName(options?.username);
     p.pfp = sanitizePfp(options?.pfp);
@@ -194,7 +260,9 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     applyLoadout(p, options?.loadout);
     applyAvatar(p, options);
     this.state.players.set(client.sessionId, p);
-    this.setUserId(client, p, typeof options?.userId === "string" ? options.userId : "");
+    const who = await identityFor(options);
+    if (this.state.players.get(client.sessionId) !== p) return; // left while the token was checked
+    this.applyIdentity(client, p, who);
   }
 
   // A deliberate `room.leave()` closes with CONSENTED -- drop the player at once. Anything
@@ -234,6 +302,9 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     this.dailies.delete(sessionId);
     this.spinStates.delete(sessionId);
     this.quests.delete(sessionId);
+    this.adAt.delete(sessionId);
+    this.adBusy.delete(sessionId);
+    this.verifiedOutfit.delete(sessionId);
   }
 
   private spinView(s: SpinState, now: number) {
@@ -292,9 +363,19 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     }
   }
 
-  // Client-trusted Bloxity user id (guest ids are dropped, see GUEST_ID_PREFIX). A forged id can
-  // only read/overwrite the SENDER's own save (there is no cross-player read in `saveProgress`).
-  // Called from both onJoin and `identify`; answers with progress / noProgress / serverError.
+  // The platform-verified account of a join / `identify` (auth.ts; "" = guest): its display name and
+  // outfit key win over what the client reported. Then the save is loaded for it.
+  private applyIdentity(client: Client, p: PlayerState, who: Verified) {
+    if (who.userId && who.username) p.username = sanitizeName(who.username);
+    if (who.userId && who.outfitKey) {
+      this.verifiedOutfit.set(client.sessionId, who.outfitKey);
+      p.outfit = who.outfitKey;
+    } else this.verifiedOutfit.delete(client.sessionId);
+    this.setUserId(client, p, who.userId);
+  }
+
+  // Bloxity user id from auth.ts (guest ids are dropped, see GUEST_ID_PREFIX); in production only a
+  // verified token yields one. Called from applyIdentity; answers with progress / noProgress / serverError.
   private setUserId(client: Client, p: PlayerState, raw: string) {
     let userId = raw.slice(0, 128);
     // Guests (client-made `guest-...` ids) get no identity: nothing is loaded or saved for them.
@@ -307,6 +388,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     this.spinStates.delete(client.sessionId); // nor spins
     this.quests.delete(client.sessionId); // nor quest rerolls
     p.signedIn = !!userId;
+    p.uid = userId;
 
     if (userId) {
       // Evict any OTHER live session already claiming this account, so one account never has

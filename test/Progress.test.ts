@@ -50,6 +50,32 @@ describe("progress", () => {
     assert.ok(!("hack" in doc));
   });
 
+  it("keeps saved cart slots and hands them back when the player returns", async () => {
+    const fake = fakePlayers([{ _id: "u2", cash: 1, version: 1, updatedAt: new Date() }]);
+    __setPlayersForTest(fake);
+    const room = await colyseus.createRoom<WorldState>("world", {});
+    const c = await colyseus.connectTo(room, { userId: "u2", username: "Bo" });
+    fake.release();
+    await sleep(150);
+    const slot = { engine: "v8", fuel: "big", wheels: "rubber", booster: "nitro" };
+    c.send("saveProgress", { cash: 1, slotsOpen: [0, 1, 2], loadouts: [slot, null, { engine: "rusty", fuel: "jerry", wheels: "wooden", booster: "none" }] });
+    await sleep(150);
+    await c.leave();
+    // Back later: a new connection reads the stored document (the gate holds until its handler is set).
+    const fake2 = fakePlayers([fake.docs.get("u2")! as any]);
+    __setPlayersForTest(fake2);
+    const room2 = await colyseus.createRoom<WorldState>("world", {});
+    const c2 = await colyseus.connectTo(room2, { userId: "u2", username: "Bo" });
+    let got: any = null;
+    c2.onMessage("progress", (m: any) => (got = m));
+    fake2.release();
+    await sleep(250);
+    assert.deepStrictEqual(got?.slotsOpen, [0, 1, 2]);
+    assert.deepStrictEqual(got?.loadouts?.[0], slot, "the saved cart comes back whole");
+    assert.strictEqual(got?.loadouts?.[1], null, "an empty slot stays empty");
+    assert.strictEqual(got?.loadouts?.[2]?.engine, "rusty");
+  });
+
   it("creates a new account's save and never saves a guest", async () => {
     const fake = fakePlayers();
     __setPlayersForTest(fake);

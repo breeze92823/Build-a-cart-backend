@@ -3,6 +3,7 @@ import type { ColyseusTestServer } from "@colyseus/testing";
 
 import type appConfig from "../src/app.config.js";
 import { WorldState } from "../src/rooms/schema/WorldState.js";
+import { ROOM_MAX_CLIENTS } from "../src/constants.js";
 import { sleep } from "./fakePlayers.js";
 import { testServer } from "./server.js";
 
@@ -34,5 +35,27 @@ describe("roster", () => {
     assert.strictEqual(pa.racing, false);
     assert.strictEqual(pa.distance, 0, "a finished race reads 0");
     assert.strictEqual(pb.pfp, "https://static.bloxity.io/img/pfps/7.png");
+  });
+
+  it("seats five players (one per base) and refuses a sixth", async () => {
+    assert.strictEqual(ROOM_MAX_CLIENTS, 5);
+    const room = await colyseus.createRoom<WorldState>("world", {});
+    assert.strictEqual(room.maxClients, 5);
+    for (let i = 0; i < 5; i++) await colyseus.connectTo(room, { userId: `guest-${i}`, username: `P${i}` });
+    await sleep(50);
+    assert.strictEqual(room.state.players.size, 5);
+    await assert.rejects(colyseus.connectTo(room, { userId: "guest-6", username: "P6" }), "the room is full");
+    assert.strictEqual(room.state.players.size, 5);
+  });
+
+  it("marks guests and keeps the verified id public for chat bubbles", async () => {
+    const room = await colyseus.createRoom<WorldState>("world", {});
+    const guest = await colyseus.connectTo(room, { userId: "guest-a", username: "G" });
+    const dev = await colyseus.connectTo(room, { devId: "dev-abc", username: "D" });
+    await sleep(50);
+    const pg = room.state.players.get(guest.sessionId)!;
+    const pd = room.state.players.get(dev.sessionId)!;
+    assert.deepStrictEqual([pg.signedIn, pg.uid], [false, ""]);
+    assert.deepStrictEqual([pd.signedIn, pd.uid], [true, "dev-abc"]);
   });
 });

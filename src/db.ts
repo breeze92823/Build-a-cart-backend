@@ -75,8 +75,11 @@ export interface Stats {
   invites?: number;
 }
 
-// Cart upgrade levels.
+// Cart upgrade levels (power / tank / aero = cart performance; dist / mult / cur = run cash).
 export interface Upgrades {
+  power?: number;
+  tank?: number;
+  aero?: number;
   dist?: number;
   mult?: number;
   cur?: number;
