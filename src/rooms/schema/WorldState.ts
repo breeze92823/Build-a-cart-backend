@@ -9,19 +9,42 @@ export const PlayerState = schema(
     pfp: t.string().default(""), // Bloxity profile picture URL ("" = none), for the others' racer heads
     racing: t.boolean().default(false), // in a race right now (`race` message)
     distance: t.float64().default(0), // this race's distance so far, studs
-    // Presence (presence.ts, `pose` / `loadout` / `setAvatar`): what the others draw in the world.
-    x: t.float64().default(0), // feet position in track coordinates (z minus the race scroll)
+    // Presence (presence.ts, `pose` / `cart` / `loadout` / `setAvatar` / `emote`): what the others draw.
+    uid: t.string().default(""), // verified Bloxity id ("" = guest); public, lets clients match chat bubbles to players
+    x: t.float64().default(0), // feet position, world coordinates as the sender sees them
     y: t.float64().default(0),
     z: t.float64().default(0),
-    yaw: t.float32().default(0), // heading, rad (PI = facing the gate)
-    speed: t.float32().default(0), // m/s, for flames and dead reckoning
-    boat: t.string().default(""), // equipped catalog ids (client config.js), "" = none / default
-    engine: t.string().default(""),
-    trail: t.string().default(""),
-    partner: t.string().default(""),
-    pets: t.string().default(""), // equipped pets "kind:tier,kind:tier"
-    world: t.string().default(""), // the world the player is in (client WORLDS id), "" = the start world
+    yaw: t.float32().default(0), // heading, rad (PI = facing -Z)
+    speed: t.float32().default(0), // m/s on foot, for the walk cycle
+    grounded: t.boolean().default(true),
     avatar: t.string().default(""), // Bloxity look JSON { equipped, proportions, skin }, "" = default
+    outfit: t.string().default(""), // Bloxity outfit key (the character kit draws a whole look from it), "" = none
+    // The cart (client config.js GEAR ids, "" = none / bare) and its trailing carts.
+    engine: t.string().default(""),
+    fuel: t.string().default(""),
+    wheels: t.string().default(""),
+    booster: t.string().default(""),
+    wagons: t.uint8().default(0), // extra carts
+    golden: t.uint8().default(0), // Golden Carts
+    // The ride (`cart` message, ~15x/s while riding): "foot" | "riding" | "crashed" | "ending".
+    ride: t.string().default("foot"),
+    crash: t.string().default(""), // crash kind while crashed (spikes, derail, herd, rocks, splash)
+    s: t.float64().default(0), // metres along the track
+    cy: t.float32().default(0), // cart height
+    pitch: t.float32().default(0),
+    roll: t.float32().default(0),
+    lx: t.float32().default(0), // lane offset (the Gem Run branch)
+    v: t.float32().default(0), // signed speed, m/s
+    throttle: t.float32().default(0), // 0..1
+    braking: t.boolean().default(false),
+    boosting: t.boolean().default(false),
+    air: t.boolean().default(false),
+    fuelOk: t.boolean().default(true), // fuel left (exhaust and flames)
+    tip: t.float32().default(0), // lean tip: past 1 the cart rides on two wheels
+    // The portal's emote wheel: the id playing ("" = none); emoteSeq changes on every emote message so
+    // the same emote can restart.
+    emote: t.string().default(""),
+    emoteSeq: t.uint16().default(0),
   },
   "PlayerState",
 );

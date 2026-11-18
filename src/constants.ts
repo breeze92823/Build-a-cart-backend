@@ -1,17 +1,36 @@
 // Keep in step with the Build a Cart client's src/config.js by hand.
-export const ROOM_MAX_CLIENTS = 50;
+// The game slug registered on bloxity.io (the client's GAME_SLUG). Bloxity hosting also injects it
+// as BLOXITY_GAME_ID, which wins when set (auth.ts gameId()).
+export const GAME_SLUG = "build-a-cart";
+
+// Five bases in a row: one player per base. Boxity learns the room size from the matchmaker joins
+// and the deploy workflow sends this number as `roomSize` (keep the `ROOM_MAX_CLIENTS = <digits>`
+// line format: the workflow greps it). Must stay 2-100 for party play.
+export const ROOM_MAX_CLIENTS = 5;
 
 // Longest accepted strings.
 export const NAME_MAX = 64;
 // Profile picture URL (Bloxity `pfp`), relayed so other players can draw it.
 export const PFP_MAX_LEN = 512;
-// Presence (presence.ts): the Bloxity avatar JSON relayed for the others to draw, the most pets
-// drawn per player, and the pose bounds (|x|, |y| and z up to `xy` m; z down to -`z` m; speed in
-// m/s). Not used by the Build a Cart client yet; kept bounded for when it is.
+// Presence (presence.ts): what the other players draw. The Bloxity avatar JSON and outfit key are
+// relayed for them (opaque, length-capped), the walking pose is bounded (|x|, |y| up to `xy` m, z
+// down to -`z` m, speed in m/s) and so is the cart's state while riding.
 export const AVATAR_MAX_LEN = 3000;
-export const PRESENCE_PETS_MAX = 8;
-export const PET_TIERS_MAX = 16;
+export const OUTFIT_MAX_LEN = 600;
 export const POSE_BOUNDS = { xy: 5000, z: 1e8, speed: 2000 };
+export const CART_BOUNDS = {
+  s: 1e6, // metres along the track
+  cy: 5000, // cart height
+  angle: 3.2, // pitch / roll, rad
+  lx: 200, // lane offset, m
+  v: 2000, // signed speed, m/s
+  tip: 4, // lean tip (the cart goes onto two wheels past 1)
+  wagons: 100, // trailing carts drawn (WAGONS_MAX)
+};
+export const RIDE_STATES = ["foot", "riding", "crashed", "ending"] as const;
+export type RideState = (typeof RIDE_STATES)[number];
+// A Bloxity emote id (24-char catalogue ids, kept opaque).
+export const EMOTE_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 // Colyseus drops the whole connection for a WebSocket message above this (default 4 KB).
 export const MAX_PAYLOAD_BYTES = 128 * 1024;
@@ -35,7 +54,7 @@ export const GEAR_SLOTS = ["engine", "fuel", "wheels", "booster"] as const;
 export const WAGONS_MAX = 100;
 export const GOLDEN_CARTS_MAX = 1e6;
 export const PASSES_MAX = 64;
-export const UPGRADE_KEYS = ["dist", "mult", "cur"] as const; // cart upgrades (levels)
+export const UPGRADE_KEYS = ["power", "tank", "aero", "dist", "mult", "cur"] as const; // cart upgrades (levels)
 export const UPGRADE_LEVEL_MAX = 1000;
 export const TOP_RUNS_MAX = 8;
 export const RESTOCK_NONCE_MAX = 1e9;
@@ -92,3 +111,29 @@ export const ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 // The client's per-browser fallback id for players who are not signed in to Bloxity.
 // Guests are never persisted.
 export const GUEST_ID_PREFIX = "guest-";
+
+// The client's per-browser dev id (VITE_DEV_MODE, no Bloxity): accepted off production only.
+export const DEV_ID_PREFIX = "dev-";
+
+// Rewarded ads (adReward.ts): a token is checked with Bloxity before the client pays out, at most
+// once per AD_COOLDOWN_MS per session (server clock).
+export const AD_TOKEN_MAX_LEN = 4096;
+export const AD_COOLDOWN_MS = 60 * 1000;
+
+// Bloxity's own leaderboards (platformBoards.ts): declared here and by the client (config.js
+// LEADERBOARDS), scores of verified players are reported in batches from the server. `best` is
+// the best ride distance, `playtime` is reported in whole minutes.
+export const PLATFORM_BOARD_EVERY_MS = 30 * 1000;
+export const PLATFORM_BOARD_BATCH = 200;
+export const PLATFORM_BOARDS = [
+  { id: "best", label: "Best Distance (m)", order: "desc", mode: "best", format: "compact", reset: "none" },
+  { id: "earned", label: "Total Earned", order: "desc", mode: "best", format: "compact", reset: "none" },
+  { id: "rebirths", label: "Rebirths", order: "desc", mode: "best", format: "number", reset: "none" },
+  { id: "playtime", label: "Play Time (min)", order: "desc", mode: "latest", format: "number", reset: "none" },
+] as const;
+export type BoardId = (typeof PLATFORM_BOARDS)[number]["id"];
+
+// SIGTERM drain (index.ts): how long a deploy / scale-down waits for the riders to leave (Legion
+// kills the pod after 10 minutes).
+export const DRAIN_MAX_MS = 9 * 60 * 1000;
+export const DRAIN_POLL_MS = 1000;
